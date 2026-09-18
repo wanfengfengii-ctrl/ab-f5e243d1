@@ -2,3 +2,16 @@
 .env
 node_modules/
 __pycache__/
+
+# Go build artifacts
+/telemetry-api
+/verify
+*.test
+*.out
+/bin/
+/dist/
+
+# Editor / OS noise
+.idea/
+.vscode/
+*.swp

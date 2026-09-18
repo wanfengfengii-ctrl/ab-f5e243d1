@@ -1,0 +1,126 @@
+# Telemetry sequence service — full acceptance topology.
+#
+#   docker compose up --build           starts database, two API instances,
+#                                       the background worker and the gateway
+#   docker compose run --rm verify      runs the one-shot acceptance job
+#
+# Only the gateway publishes a port to the host, and it defaults to 8080.
+# Override with API_PORT (e.g. API_PORT=18080 docker compose up).
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: telemetry
+      POSTGRES_PASSWORD: telemetry
+      POSTGRES_DB: telemetry
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U telemetry -d telemetry"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  api1:
+    build:
+      context: .
+    image: telemetry-service:local
+    environment: &api-env
+      ROLE: api
+      HTTP_ADDR: ":8080"
+      DATABASE_URL: "postgres://telemetry:telemetry@db:5432/telemetry?sslmode=disable"
+      ADMIN_TOKEN: "${ADMIN_TOKEN:-change-me-admin-token-please-rotate}"
+      SERVER_SIGNING_KEY: "${SERVER_SIGNING_KEY:-MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=}"
+      MAX_BODY_BYTES: "4194304"
+      COMPACTION_INTERVAL_SECONDS: "30"
+      COMPACTION_KEEP_EVENTS: "200"
+      VIEW_TTL_SECONDS: "600"
+      LOG_LEVEL: info
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/app/telemetry", "healthcheck"]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+    restart: unless-stopped
+
+  api2:
+    image: telemetry-service:local
+    build:
+      context: .
+    environment: *api-env
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/app/telemetry", "healthcheck"]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+    restart: unless-stopped
+
+  worker:
+    image: telemetry-service:local
+    build:
+      context: .
+    environment:
+      <<: *api-env
+      ROLE: worker
+      HTTP_ADDR: ":8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+
+  gateway:
+    image: telemetry-service:local
+    build:
+      context: .
+    environment:
+      ROLE: gateway
+      HTTP_ADDR: ":8080"
+      UPSTREAM_URL: "http://api1:8080,http://api2:8080"
+      ADMIN_TOKEN: "${ADMIN_TOKEN:-change-me-admin-token-please-rotate}"
+      SERVER_SIGNING_KEY: "${SERVER_SIGNING_KEY:-MzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzMzM=}"
+      DATABASE_URL: "postgres://telemetry:telemetry@db:5432/telemetry?sslmode=disable"
+      HEALTHCHECK_URL: "http://127.0.0.1:8080/healthz"
+    ports:
+      # The single host-published API port, overridable via API_PORT.
+      - "${API_PORT:-8080}:8080"
+    depends_on:
+      api1:
+        condition: service_healthy
+      api2:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/app/telemetry", "healthcheck"]
+      interval: 5s
+      timeout: 4s
+      retries: 20
+    restart: unless-stopped
+
+  verify:
+    image: telemetry-service:local
+    build:
+      context: .
+    entrypoint: ["/app/verify"]
+    profiles: ["verify"]
+    environment:
+      BASE_URL: "http://gateway:8080"
+      ADMIN_TOKEN: "${ADMIN_TOKEN:-change-me-admin-token-please-rotate}"
+    depends_on:
+      db:
+        condition: service_healthy
+      api1:
+        condition: service_healthy
+      api2:
+        condition: service_healthy
+      gateway:
+        condition: service_healthy
+
+volumes:
+  db-data:
